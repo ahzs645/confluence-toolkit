@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "120",
+  "name": "Confluence Toolkit",
+  "version": "0.3.0",
+  "description": "Search, edit, and audit Confluence. Run Jira tools from the same Chrome extension.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnewcbfesHkJVd/p915vwQdONafZiEf5TAkNsyVDFFDLWrzuP+MtcJMBBMrFdi3EtAVCG/x+RfwQxT0aDhHf1QdNz2gIiWIb2QUc/YwL3PPZZzRRoONTFepSW8cXZZl771tF/U3YMBTuII5GpbTWUN9mIc5q6+shFyNj4nk4eSTE2wsoEz1xk8v6PfTk+otiERbyyJB7iqTL6N3B0juImBQ9Kqkb1RjPL4csR9D3oC3QDz5kaGkpj5p1xr9Y+Wo5MQChx7j2tenDd4fVoAjpIptXc0U2yncQnnX/w8VsrSEhJmjAQo0y7U6nvMDETEo84v2UONHvUXh1q7Cn7D4nFRQIDAQAB",
+  "action": { "default_title": "Confluence Toolkit", "default_popup": "index.html" },
+  "background": { "service_worker": "static/js/background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "icons": { "16": "logo16.png", "48": "logo48.png", "128": "logo128.png" },
+  "permissions": ["scripting", "storage", "tabs", "sidePanel", "nativeMessaging"],
+  "optional_host_permissions": ["https://*/*"]
+}
