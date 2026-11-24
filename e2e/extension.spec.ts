@@ -1,3 +1,5 @@
+import { importPlannerOwners, plannerOwners } from '../src/services/PlannerAssignee';
+import { legacyPlannerDescription, plannerFile } from '../src/services/PlannerTransfer';
 import { chromium, expect, test, type Route } from '@playwright/test';
 import { join, resolve } from 'node:path';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -488,4 +490,313 @@ test('Whole-space audit loads batches, exports reports, and applies only reviewe
     expect(pages.get('42')!.body.storage.value).toBe(`<h2>Setup</h2><p>=plain text ${old}</p><a title="Keep" href="/wiki/guide?a=1&amp;b=2">=Broken</a>`);
     expect(pages.get('43')!.body.storage.value).toBe(original);
   } finally { await close(); }
+});
+
+test('Planner conversion previews cards, reuses template steps, and downloads a Jira hierarchy', async () => {
+  const { browser, close, uiUrl } = await openExtension(cloud);
+  try {
+    const ui = await browser.newPage();
+    await ui.goto(uiUrl + '/workspace.html');
+    await ui.getByRole('button', { name: 'Planner conversion' }).click();
+    const input = ui.getByLabel('Planner export JSON');
+    const tasks = [
+      { title: 'Implementation template', checklist: [{ title: 'Confirm scope' }, { title: 'Review reporting', isChecked: true }] },
+      { title: 'Example, "clinic"', id: 'card-2', bucket: 'Blocked', labels: ['Implementation'], dueDateTime: '2027-01-15T12:00:00Z',
+        percentComplete: 50, description: 'Note one\nNote two', checklist: [{ title: 'Confirm scope', isChecked: true }] },
+    ];
+    await input.setInputFiles({ name: 'plan.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ plan: { title: 'Example' }, tasks })) });
+    await ui.getByLabel('Standard checklist for cards labeled Implementation').selectOption('0');
+    await expect(ui.getByRole('status')).toContainText('1 card and 2 checklist subtasks');
+    await ui.getByText('Preview work items', { exact: true }).click();
+    await expect(ui.getByRole('listitem').filter({ hasText: 'Example, "clinic"' })).toContainText('Due 2027-01-15');
+    await expect(ui.locator('li time')).toHaveCount(1);
+    const pending = ui.waitForEvent('download');
+    await ui.getByRole('button', { name: 'Download Jira CSV' }).click();
+    const download = await pending;
+    const csv = await readFile((await download.path())!, 'utf8');
+    expect(csv).not.toContain('bucket-Blocked');
+    expect(csv).not.toContain('planner-card');
+    expect(csv).toContain('"1","","Task","Example, ""clinic"""');
+    expect(csv).toContain('Note one\nNote two');
+    expect(csv).toContain('"In Progress","","","2027-01-15","Implementation"');
+    expect(csv).toContain('"2","1","Sub-task","Confirm scope"');
+    expect(csv).toContain('"Done","","","",""');
+    expect(csv).toContain('"3","1","Sub-task","Review reporting"');
+    expect(csv).toContain('"To Do","","","",""');
+    await input.setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{"plan":{},"tasks":[{}]}') });
+    await expect(ui.getByRole('alert')).toContainText('tasks.0.title');
+    await expect(ui.getByRole('button', { name: 'Download Jira CSV' })).toHaveCount(0);
+  } finally { await close(); }
+});
+
+test('Planner heading export follows Jira pagination and carries current summaries and links', async () => {
+  const jira = 'https://jira-fixture.atlassian.net';
+  const { browser, close, uiUrl } = await openExtension(jira);
+  try {
+    const tab = await browser.newPage();
+    await tab.route(jira + '/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/jira/projects') return route.fulfill({ contentType: 'text/html', body: '<title>Test Jira</title>' });
+      if (url.pathname === '/rest/api/3/myself') return json(route, { accountId: 'user', displayName: 'Test user' });
+      if (url.pathname === '/rest/api/3/search/jql') {
+        expect(url.searchParams.get('jql')).toContain('project = "TEST" ORDER BY key');
+        const next = url.searchParams.get('nextPageToken');
+        const key = next ? 'TEST-2' : 'TEST-1';
+        return json(route, { issues: [{ key, properties: next ? {plannerSource:'planner-src-fixture'} : {}, fields: { labels:next ? [] : ['planner-card'], issuetype:{subtask:false}, summary: 'Current ' + key, status: { name: 'Done' } } }],
+          ...(next ? { isLast: true } : { nextPageToken: 'next' }) });
+      }
+      return json(route, {}, 404);
+    });
+    await tab.goto(jira + '/jira/projects');
+    const ui = await browser.newPage();
+    await ui.goto(uiUrl + '/workspace.html');
+    await ui.getByRole('button', { name: 'Jira', exact: true }).click();
+    await ui.getByRole('button', { name: 'Connect tab' }).click();
+    await expect(ui.getByText('Test user', { exact: true })).toBeVisible();
+    await ui.getByRole('button', { name: 'Planner conversion' }).click();
+    await ui.getByLabel('Jira project key').fill('test');
+    const pending = ui.waitForEvent('download');
+    await ui.getByRole('button', { name: 'Download Planner CSV' }).click();
+    const csv = await readFile((await (await pending).path())!, 'utf8');
+    expect(csv).toContain('"OutlineNumber","Title","Bucket","Description"');
+    expect(csv).toContain('"2","Current TEST-2","Done","' + jira + '/browse/TEST-2');
+    await expect(ui.getByRole('status')).toContainText('Exported 2 Jira headings.');
+  } finally { await close(); }
+});
+
+test('direct Planner transfer adopts a CSV parent, creates a child, resumes and preserves subsequent Jira changes', async () => {
+  const jira = 'https://jira-fixture.atlassian.net';
+  const { browser, close, uiUrl } = await openExtension(jira);
+  type Fields = {project:{key:string}; summary:string; labels:string[]; issuetype:{id:string;subtask:boolean};
+    status:{name:string}; description: unknown; parent?:{key:string}; start?:string; duedate?:string};
+  const issues = new Map<string,Fields>([['TEST-5',{project:{key:'TEST'}, summary:'Pilot', labels:['planner-card'],
+    issuetype:{id:'10',subtask:false},status:{name:'To Do'},description:'Original notes\nid: c-1'}]]);
+  const properties = new Map<string,Record<string,string>>();
+  const links = new Map<string,string>();
+  const categoryOptions = new Map([['Active','110']]);
+  let interrupted = true;
+  try {
+    const tab = await browser.newPage();
+    await tab.route(jira+'/**', async route=>{
+      const url = new URL(route.request().url());
+      const method=route.request().method();
+      const path=url.pathname.replace('/rest/api/3/','');
+      if(path==='/jira/projects') return route.fulfill({contentType:'text/html',body:'<title>Test Jira</title>'});
+      if(path==='myself') return json(route,{accountId:'user',displayName:'Test user'});
+      if(path==='project/TEST') return json(route,{id:'100',key:'TEST',issueTypes:[{id:'10',name:'Task',subtask:false},{id:'11',name:'Sub-task',subtask:true}]});
+      if(path.startsWith('issue/createmeta/TEST/issuetypes/')) return json(route,{total:2,fields:[{fieldId:'priority',allowedValues:[{name:'Urgent'}]},{
+        fieldId:'category',schema:{custom:'com.atlassian.jira.plugin.system.customfieldtypes:jwm-category'},
+        allowedValues:[...categoryOptions].map(([value,id])=>({id,value})),
+      }]});
+      if(url.pathname==='/rest/gira/1/'){
+        const body=route.request().postDataJSON();
+        expect(body.operationName).toBe('JwmCreateCategory');expect(body.variables.input.projectId).toBe('100');
+        const {value}=body.variables.input;expect(value).toBe('Empty bucket');expect(categoryOptions.has(value)).toBe(false);
+        categoryOptions.set(value,'111');
+        return json(route,{data:{createJwmCategory:{success:true,category:{option:{value,optionId:'111'}}}}});
+      }
+      if(path==='user/assignable/search') {
+        expect(url.searchParams.get('project')).toBe('TEST');
+        return json(route,[{accountId:'pilot-owner',displayName:'Pilot in Jira',emailAddress:'pilot@example.org',active:true},{accountId:'other',displayName:'Pilot owner',emailAddress:'other@example.org',active:true}]);
+      }
+      if(path==='search/jql') return json(route,{issues:[...issues].map(([key,fields])=>({key,fields,properties:properties.get(key)}))});
+      if(path==='issue' && method==='POST'){
+        const f=route.request().postDataJSON().fields;
+        const key='TEST-'+(issues.size+5);
+        properties.set(key,{plannerSource:route.request().postDataJSON().properties[0].value});
+        issues.set(key,{...f,project:{key:'TEST'},issuetype:{...f.issuetype,subtask:!!f.parent},status:{name:'To Do'}});
+        return json(route,{key},201);
+      }
+      const [,key,op]=path.split('/');
+      const issue=issues.get(key);
+      if(!issue)return json(route,{},404);
+      if(op==='editmeta') return json(route,{fields:{
+        customfield_88:{name:'Planner owners',schema:{type:'array',items:'user'}},
+        start:{name:'Start date',schema:{type:'date'}},timetracking:{name:'Time tracking'},
+        ...Object.fromEntries(['Readiness Assessment','Complexity Score','Ticket #'].map((name,index) =>
+          ['customfield_'+index,{name,schema:{type:'string',custom:'com.atlassian.jira.plugin.system.customfieldtypes:textfield'}}])),
+      }});
+      if(op==='remotelink') {
+        if(method==='GET') return json(route,[...links.values()].map(url=>({object:{url}})));
+        const link=route.request().postDataJSON();
+        links.set(link.globalId,link.object.url);
+        return json(route,{id:links.size});
+      }
+      if(op==='transitions'){
+        if(method==='GET')return json(route,{transitions:[{id:'1',to:{name:'Done'}}]});
+        if(interrupted){interrupted=false;return json(route,{},429);}
+        issue.status={name:'Done'};return blank(route);
+      }
+      if(method==='PUT'){
+        const body=route.request().postDataJSON();
+        if(op==='assignee'){expect(body.accountId).toBe('pilot-owner');Object.assign(issue,{assignee:{accountId:body.accountId,displayName:'Pilot owner'}});return blank(route);}
+        if(body.properties) properties.set(key,{plannerSource:body.properties[0].value});
+        const update=body.fields;
+        if(update.description===null) update.description={type:'doc',version:1,content:[]};
+        if(update.timetracking) {
+          expect(update.timetracking).toEqual({originalEstimate:'120m',remainingEstimate:'90m'});
+          update.timetracking={originalEstimateSeconds:7200,remainingEstimateSeconds:5400};
+        }
+        Object.assign(issue,update);return blank(route);
+      }
+      return json(route,{key,fields:issue,properties:properties.get(key)});
+    });
+    await tab.goto(jira+'/jira/projects');
+    const popup=await browser.newPage();
+    await popup.goto(uiUrl+'/index.html');
+    const opened=browser.waitForEvent('page');
+    await popup.getByRole('button',{name:'Open Planner importer'}).click();
+    const ui=await opened;
+    await ui.waitForURL('**/workspace.html#planner');
+    await ui.getByRole('button',{name:'Connect tab'}).click();
+    await expect(ui.getByText('Test user',{exact:true})).toBeVisible();
+    const input={source:'planner-browser',plan:{id:'plan',title:'Original',url:'https://planner.cloud.microsoft/sample'},plannerRecords:{resources:[{id:'r1',name:'Pilot owner',userPrincipalName:'pilot@example.org'}],assignments:[{taskId:'c-1',resourceId:'r1'}],buckets:[{id:'b1',name:'Active'},{id:'b2',name:'Empty bucket'}]},tasks:[
+      {id:'c-1',title:'Pilot',bucket:'Active',assignedTo:['Pilot owner'],priority:'Medium',labels:['pilot'],duration:3600,work:7200,actualWork:1800,remainingWork:5400,
+       percentComplete:0,conversationReferences:[{teamsConversationId:'example-thread'}],
+       history:{state:'complete',events:[{editType:'TaskCreated',timestamp:'2026-10-10T00:00:00Z'}]},
+       customFields:{'Readiness Assessment':'Ready','Complexity Score':'Not complex','Ticket #':'SCTASK01 A2'},
+       startDateTime:'2026-11-23',dueDateTime:'2027-12-31',attachments:[{name:'Document',uri:'https://example.org/document'}],
+        checklist:[{id:'i-1',title:'Review',isChecked:true}]},
+    ]};
+    const parsed = plannerFile.parse(input);
+    const parentIssue = issues.get('TEST-5')!;
+    parentIssue.description = legacyPlannerDescription(parsed,parsed.tasks[0]);
+    parentIssue.start = '2026-11-23';
+    parentIssue.duedate = '2027-12-31';
+    await ui.getByLabel('Planner export JSON').setInputFiles({name:'pilot.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(input))});
+    await ui.getByLabel('Jira project key').fill('TEST');
+    const run=ui.getByRole('button',{name:'Import directly into TEST'});
+    await ui.getByLabel('Match existing Jira work items only').check();
+    await run.click();
+    await expect(ui.getByText(/No existing Jira match for Review/)).toBeVisible();
+    expect(issues.size).toBe(1);
+    expect(parentIssue.start).toBe('2026-11-23');
+    expect(parentIssue.duedate).toBe('2027-12-31');
+    expect(parentIssue.description).toMatchObject({type:'doc',content:expect.arrayContaining([
+      expect.objectContaining({type:'heading',content:[{type:'text',text:'Attachments'}]})
+    ])});
+    const currentDescription = () => JSON.stringify(parentIssue.description);
+    for(const omitted of ['Change history','Working duration','Total effort','Completed effort','Remaining effort','Planner owners:','Bucket:','Labels:','Schedule','Planner source','Planner card ID:','Plan: Original','Priority: Medium','Progress','Related work','example-thread']) {
+      expect(currentDescription()).not.toContain(omitted);
+    }
+    expect(parentIssue).toMatchObject({customfield_0:'Ready',customfield_1:'Not complex',customfield_2:'SCTASK01 A2'});
+    const rerun = async () => {
+      await run.click();
+      await expect(ui.getByText(/No existing Jira match for Review/)).toBeVisible();
+    };
+    expect(parentIssue.labels).toEqual(['pilot']);
+    expect(parentIssue).toHaveProperty('assignee.accountId','pilot-owner');
+    expect(parentIssue).toHaveProperty('customfield_88',[{accountId:'pilot-owner'}]);
+    const copyPlan=ui.getByLabel(/Include Planner source details/);
+    const copyPriority=ui.getByLabel('Include Planner priority in the description');
+    const progressText=ui.getByLabel('Include Planner progress and status in the description');
+    const scheduleText=ui.getByLabel('Include Planner start and finish in the description');
+    const conversations=ui.getByLabel('Include Teams conversation references in the description');
+    for (const option of [progressText,scheduleText,conversations,copyPriority,copyPlan]) await expect(option).not.toBeChecked();
+    await progressText.check();await rerun();
+    expect(currentDescription()).toContain('Progress: 0%');expect(currentDescription()).not.toContain('Priority: Medium');
+    await progressText.uncheck();await scheduleText.check();await rerun();
+    expect(currentDescription()).toContain('Start: 2026-11-23');expect(currentDescription()).toContain('Finish: 2027-12-31');
+    expect(currentDescription()).not.toContain('Progress:');
+    await scheduleText.uncheck();await conversations.check();await rerun();
+    expect(currentDescription()).toContain('example-thread');expect(currentDescription()).not.toContain('Schedule');
+    await conversations.uncheck();
+    await copyPlan.check();await rerun();
+    expect(currentDescription()).not.toContain('example-thread');
+    expect(currentDescription()).toContain('Plan: Original');
+    expect(currentDescription()).toContain('Planner card ID: c-1');
+    await copyPlan.uncheck();await copyPriority.check();await rerun();
+    expect(currentDescription()).toContain('Priority: Medium');expect(currentDescription()).not.toContain('Plan: Original');
+    await copyPriority.uncheck();
+    const copyHistory=ui.getByLabel('Include Planner change history in the description');
+    const copyEffort=ui.getByLabel('Include Planner duration and effort in the description');
+    const copyEstimates=ui.getByLabel(/Copy total and remaining effort/);
+    for(const option of [copyHistory,copyEffort,copyEstimates])await expect(option).not.toBeChecked();
+    await copyHistory.check();await rerun();
+    expect(currentDescription()).toContain('Change history');expect(currentDescription()).not.toContain('Working duration');
+    await copyHistory.uncheck();await copyEffort.check();await rerun();
+    expect(currentDescription()).toContain('Working duration: 1 hours');expect(currentDescription()).not.toContain('Change history');
+    expect(parentIssue).not.toHaveProperty('timetracking');
+    await copyEffort.uncheck();await copyEstimates.check();await rerun();
+    expect(parentIssue).toHaveProperty('timetracking.originalEstimateSeconds',7200);
+    expect(currentDescription()).not.toContain('Working duration');
+    parentIssue.description='Edited by a Jira user';
+    await ui.getByLabel('Match existing Jira work items only').uncheck();
+    await run.click();
+    await expect(ui.getByText(/rate limiting requests/)).toBeVisible();
+    expect(issues.size).toBe(2);
+    await run.click();
+    await expect(ui.getByText(/Verified 2 work items in TEST/)).toBeVisible();
+    expect(issues.get('TEST-5')?.start).toBe('2026-11-23');
+    expect(issues.get('TEST-6')?.status.name).toBe('Done');
+    expect(issues.get('TEST-6')?.parent?.key).toBe('TEST-5');
+    expect(links.size).toBe(2);
+    expect(parentIssue.description).toBe('Edited by a Jira user');
+    expect(categoryOptions.size).toBe(2);
+    expect(issues.get('TEST-5')).toHaveProperty('category.id','110');
+    expect(issues.get('TEST-6')).toHaveProperty('category.id','110');
+    await ui.evaluate(() => chrome.storage.local.clear());
+    Object.assign(parentIssue,{summary:'Renamed in Jira',assignee:{accountId:'editor',displayName:'Editor'}});
+    await run.click();
+    await expect(ui.getByText(/Created 0, reused 2/)).toBeVisible();
+    expect(parentIssue).toHaveProperty('assignee.accountId','editor');
+    expect(issues.get('TEST-6')!.labels).toEqual([]);
+    issues.get('TEST-6')!.status={name:'In Progress'};
+    await run.click();
+    await expect(ui.getByText(/Created 0, reused 2/)).toBeVisible();
+    expect(issues.get('TEST-6')?.status.name).toBe('In Progress');
+    expect(issues.size).toBe(2);
+    parentIssue.description='Planner source\nPlanner card ID: c-1';
+    await ui.getByLabel('Planner export JSON').setInputFiles({name:'empty.json',mimeType:'application/json',
+      buffer:Buffer.from(JSON.stringify({plan:input.plan,tasks:[{id:'c-1',title:'Pilot'}]}))});
+    await run.click();
+    await expect(ui.getByText(/Verified 1 work item in TEST/)).toBeVisible();
+    expect(parentIssue.description).toEqual({type:'doc',version:1,content:[]});
+    await ui.getByLabel('Planner export JSON').setInputFiles({name:'urgent.json',mimeType:'application/json',
+      buffer:Buffer.from(JSON.stringify({plan:input.plan,tasks:[{id:'urgent',title:'Urgent card',priority:'Urgent'}]}))});
+    await run.click();
+    await expect(ui.getByText(/Created 1, reused 0/)).toBeVisible();
+    expect(issues.get('TEST-7')).toHaveProperty('priority.name','Urgent');
+    const shared = {id:'shared',title:'Shared card',assignedTo:['Missing owner','Pilot in Jira']};
+    await ui.getByLabel('Planner export JSON').setInputFiles({name:'shared.json',mimeType:'application/json',
+      buffer:Buffer.from(JSON.stringify({plan:input.plan,tasks:[shared]}))});
+    await run.click();
+    await expect(ui.getByText(/Created 1, reused 0/)).toBeVisible();
+    expect(issues.get('TEST-8')).toMatchObject({assignee:null,customfield_88:[{accountId:'pilot-owner'}]});
+    Object.assign(issues.get('TEST-8')!,{assignee:{accountId:'team-lead'}});
+    await run.click();
+    await expect(ui.getByText(/Created 0, reused 1/)).toBeVisible();
+    expect(issues.get('TEST-8')).toHaveProperty('assignee.accountId','team-lead');
+  } finally {await close();}
+});
+
+
+test('shared cards keep the primary available, sort the configured owner last and report ambiguous accounts', async () => {
+  const card = {title:'Shared',assignedTo:['Fixture Manager','Alex Smith','Other Owner']};
+  const warnings = new Set<string>();
+  const users = [{accountId:'manager',displayName:'Fixture Manager'},{accountId:'other',displayName:'Other Owner'},
+    {accountId:'first',displayName:'Alex Smith'},{accountId:'second',displayName:'Alex Smith'}];
+  const fields = {customfield_88:[] as {accountId:string}[],assignee:null};
+  let writes = 0;
+  async function run<T>(tool:string,input:Record<string,unknown>):Promise<T> {
+    if (tool==='jira_search_users') return {results:users} as T;
+    if (tool==='jira_update_issue') {
+      writes++;
+      Object.assign(fields,input.fields);
+      return {} as T;
+    }
+    expect(tool).toBe('jira_get_issue');
+    return {fields} as T;
+  }
+  const cache = new Map<string,string[]>();
+  expect(plannerOwners(card,'')).toEqual(card.assignedTo);
+  expect(plannerOwners(card,'fixture manager')).toEqual(['Alex Smith','Other Owner','Fixture Manager']);
+  for (let i=0;i<2;i++) {
+    const result = await importPlannerOwners(run,'TEST','TEST-5',card,fields,true,'customfield_88',undefined,cache,warnings,'Fixture Manager');
+    expect(result.unmatched).toEqual(['Alex Smith']);
+    expect(result.assignee).toBe('');
+  }
+  expect(writes).toBe(1);
+  expect(fields.customfield_88).toEqual([{accountId:'other'},{accountId:'manager'}]);
+  expect([...warnings].join(' ')).toContain('2 exact matches');
 });

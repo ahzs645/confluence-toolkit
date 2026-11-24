@@ -10,6 +10,7 @@ const account = z.string().min(1).max(255);
 const paging = { limit: z.number().int().min(1).max(100).default(25), start: z.number().int().min(0).max(1_000_000).optional() };
 const project = { projectKey: key };
 const issueInput = { issue };
+const plannerSource = z.string().regex(/^planner-src-[a-f0-9]{64}$/).optional();
 const commentId = { ...issueInput, commentId: numberId };
 const board = { boardId: numberId };
 const sprint = { sprintId: numberId };
@@ -27,16 +28,16 @@ const sprintDetails = {
 export const jiraTools = {
   jira_whoami: tool('Check Jira session', 'Identify the signed-in Jira account.', false, {}),
   jira_search: tool('Search issues', 'Find Jira issues with JQL. Pass the nextPageToken returned by Cloud or the offset for Data Center.', false, {
-    jql, ...paging, nextPageToken: z.string().max(4096).optional(),
+    jql, ...paging, plannerProperties:z.boolean().optional(), fields: z.array(z.enum(['summary','status','issuetype','parent','project','labels','description'])).min(1).max(7).optional(), nextPageToken: z.string().max(4096).optional(),
   }),
-  jira_get_issue: tool('Read issue', 'Read a Jira issue by key or numeric ID.', false, issueInput),
+  jira_get_issue: tool('Read issue', 'Read a Jira issue by key or numeric ID.', false, {issue, plannerProperties:z.boolean().optional(), identityOnly:z.boolean().optional()}),
   jira_get_issue_fields: tool('Read issue edit fields', 'Get field and option metadata for one issue.', false, issueInput),
   jira_list_fields: tool('List Jira fields', 'List standard and custom fields.', false, {}),
   jira_issue_history: tool('Read issue history', 'Get issue changelog. Data Center returns the changelog embedded in the issue.', false, { ...issueInput, ...paging }),
   jira_create_issue: tool('Create issue', 'Create an issue using the project and issue type. Additional fields can provide project-required values.', true, {
-    ...project, issueTypeId: numberId, summary: shortText, description: comment.optional(), fields: fields.optional(),
+    ...project, plannerSource, issueTypeId: numberId, summary: shortText, description: comment.optional(), fields: fields.optional(),
   }),
-  jira_update_issue: tool('Edit issue', 'Change one or more Jira issue fields. Use Jira’s field IDs and values.', true, { ...issueInput, fields }),
+  jira_update_issue: tool('Edit issue', 'Change one or more Jira issue fields. Use Jira’s field IDs and values.', true, { ...issueInput, fields, plannerSource }),
   jira_delete_issue: tool('Delete issue', 'Permanently delete one issue. Subtasks are protected by Jira’s default delete behavior.', true, {
     ...issueInput, confirm: z.literal(true),
   }, true),
@@ -68,6 +69,16 @@ export const jiraTools = {
   jira_add_worklog: tool('Log time', 'Add time spent to a Jira issue.', true, {
     ...issueInput, seconds: z.number().int().min(1).max(31_536_000), started: z.string().max(40).optional(), text: comment.optional(),
   }),
+  jira_get_create_fields: tool('Read create fields', 'Read a page of Jira Cloud create fields for a project work type.', false, {
+    ...project, issueTypeId: numberId, ...paging,
+  }),
+  jira_create_category: tool('Create work category', 'Add an option to the Category field in a Jira Cloud business project.', true, {
+    projectId: numberId, issueTypeId: numberId, value: shortText,
+  }),
+  jira_list_web_links: tool('Read web links', 'List the saved web links for an issue.', false, issueInput),
+  jira_put_web_link: tool('Add or update a web link', 'Save a source link on a Jira issue. Reusing the global ID updates that link.', true, {
+    ...issueInput, globalId: shortText, title: shortText, url: z.url({ protocol: /^https?$/ }).max(4096),
+  }),
   jira_get_attachment: tool('Read Jira attachment', 'Get attachment metadata and a signed-in browser download URL.', false, { attachmentId: numberId }),
   jira_list_link_types: tool('List issue link types', 'List the available Jira issue link types.', false, {}),
   jira_link_issues: tool('Link issues', 'Create a link between two issues using an existing link type.', true, {
@@ -75,7 +86,7 @@ export const jiraTools = {
   }),
   jira_unlink_issues: tool('Remove issue link', 'Delete a specific issue link.', true, { linkId: numberId, confirm: z.literal(true) }, true),
   jira_search_users: tool('Search Jira users', 'Find Jira users by display name, email, or username as allowed by the instance.', false, {
-    query: shortText, ...paging,
+    query: shortText, projectKey:key.optional(), ...paging,
   }),
   jira_list_watchers: tool('List issue watchers', 'Read watcher information for an issue.', false, issueInput),
   jira_add_watcher: tool('Add watcher', 'Add a Cloud account ID or Data Center username as watcher.', true, { ...issueInput, user: account }),

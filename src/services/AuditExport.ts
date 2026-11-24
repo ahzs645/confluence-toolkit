@@ -1,6 +1,6 @@
 import type { AuditReport } from '../models/audit';
 
-function csvCell(value: string | number | undefined) {
+export function csvCell(value: string | number | undefined) {
   let text = String(value ?? '');
   if (/^\s*[=+@-]|^[\t\r\n]/.test(text)) text = "'" + text;
   return '"' + text.replaceAll('"', '""') + '"';

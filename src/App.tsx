@@ -4,6 +4,7 @@ import { AssistantBridge, ConnectionPanel } from './features/connection/Connecti
 import { AuditPanel } from './features/audit/AuditPanel';
 import { ScriptsPanel } from './features/scripts/ScriptsPanel';
 import { ToolPanel } from './features/scripts/ToolPanel';
+import { PlannerPanel } from './features/planner/PlannerPanel';
 import { Workspace } from './features/workspace/Workspace';
 import { request } from './services/ExtensionCommunicationService';
 
@@ -11,7 +12,7 @@ const surface = document.documentElement.dataset.surface;
 const views = [
   { id: 'pages', label: 'Pages' }, { id: 'scripts', label: 'Scripts' },
   { id: 'audit', label: 'Search & Audit' },
-  { id: 'tools', label: 'Confluence tools' }, { id: 'jira', label: 'Jira' },
+  { id: 'tools', label: 'Confluence tools' }, { id: 'jira', label: 'Jira' }, { id: 'planner', label: 'Planner conversion' },
 ] as const;
 
 export default function App() {
@@ -19,7 +20,7 @@ export default function App() {
   const [tabUrl, setTabUrl] = useState<string>();
   const [windowId, setWindowId] = useState<number>();
   const [error, setError] = useState('');
-  const [view, setView] = useState<typeof views[number]['id']>('pages');
+  const [view, setView] = useState<typeof views[number]['id']>(location.hash === '#planner' ? 'planner' : 'pages');
 
   const refresh = useCallback(() => {
     void request<Session>({ type: 'state' }).then(current => {
@@ -57,8 +58,8 @@ export default function App() {
     return () => { current = false; chrome.tabs.onUpdated.removeListener(update); };
   }, [tabId]);
 
-  function openWorkspace() {
-    void chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html') }).catch(error => setError(error.message));
+  function openWorkspace(planner = false) {
+    void chrome.tabs.create({ url: chrome.runtime.getURL('workspace.html') + (planner ? '#planner' : '') }).catch(error => setError(error.message));
   }
 
   function openSidePanel() {
@@ -67,17 +68,18 @@ export default function App() {
     }
   }
 
-  const binding = view === 'jira' ? session?.jiraBinding : session?.binding;
-  const product = view === 'jira' ? 'jira' : 'confluence';
+  const binding = (view === 'jira' || view === 'planner') ? session?.jiraBinding : session?.binding;
+  const product = (view === 'jira' || view === 'planner') ? 'jira' : 'confluence';
 
   return <main className="app">
     <header className="top">
       <div className="brand"><img src="logo48.png" alt="" /><div><h1>Confluence Toolkit</h1>
         <p>{binding ? new URL(binding.site.origin).hostname : 'Chrome workspace'}</p></div>
       </div>
-      {surface !== 'workspace' && <button type="button" onClick={openWorkspace}>Open workspace ↗</button>}
+      {surface !== 'workspace' && <button type="button" onClick={() => openWorkspace()}>Open workspace ↗</button>}
       {surface === 'index' && <button type="button" className="text-button" disabled={windowId === undefined} onClick={openSidePanel}>Side panel</button>}
     </header>
+    {surface === 'index' && <button type="button" onClick={() => openWorkspace(true)}>Open Planner importer</button>}
     {error && <div className="error" role="alert">{error}</div>}
     <nav className="surface-tabs" aria-label="Extension tools">
       {views.map(item => <button key={item.id} type="button" aria-pressed={view === item.id}
@@ -92,7 +94,8 @@ export default function App() {
             }}>Disconnect</button>
           </section>}
           {(session.binding || session.jiraBinding) && <AssistantBridge session={session} refresh={refresh} />}
-          {!binding
+          {view === 'planner' && !binding && <ConnectionPanel product="jira" onConnect={refresh} />}
+          {view === 'planner' ? <PlannerPanel key={binding?.documentId} binding={binding} /> : !binding
             ? <ConnectionPanel key={product} product={product} onConnect={refresh} />
             : view === 'pages'
               ? <Workspace key={`workspace-${binding.documentId}`} binding={binding} tabUrl={tabUrl} />

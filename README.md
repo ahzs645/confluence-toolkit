@@ -30,7 +30,7 @@ This command registers a user-level native host for Chrome and prints the MCP cl
 
 In Confluence Toolkit, expand **Local assistant** and click **Start bridge**. Choose **Read only**, **Edit existing**, **Create and edit**, or **Full access** before starting it. Full access includes destructive tools. The bridge can use separate Confluence and Jira connections. Switching or reloading either connected tab stops the bridge and requires reconnecting that tab.
 
-The MCP server communicates over stdio and a private Unix socket. It exposes 84 tools across Confluence and Jira. The extension's **Confluence tools** and **Jira** views also run those registered operations with structured JSON arguments and no local host. Cloud and Data Center operations use the selected tab’s same-origin session. Chrome keeps the session cookies. Page updates require the version read when preparing the change, and failures are surfaced to the caller for reconciliation.
+The MCP server communicates over stdio and a private Unix socket. It exposes 87 tools across Confluence and Jira. The extension's **Confluence tools** and **Jira** views also run those registered operations with structured JSON arguments and no local host. Cloud and Data Center operations use the selected tab’s same-origin session. Chrome keeps the session cookies. Page updates require the version read when preparing the change, and failures are surfaced to the caller for reconciliation.
 
 ## Tools in the Chrome side panel
 
@@ -43,6 +43,32 @@ Example script:
 ```
 
 Use **Confluence tools** for page history, templates, content restrictions, space permissions, users, page analytics, comments, and attachments. Use **Jira** to connect a separate tab and work with JQL, issues, project metadata, comments, transitions, links, watchers, worklogs, boards, sprints, service desks, queues, requests, and SLAs. Tool availability depends on the product, deployment, permissions, and license.
+
+## Convert a Planner plan to Jira
+
+For destination setup, field mapping, verification and recovery, see the [Planner transfer handoff](docs/planner-transfer.md).
+
+Open the Premium plan in your signed-in Chrome profile. In the Microsoft Planner Exporter popup, choose **Export plan for Jira**. The new plan tab shows the card and checklist totals when ready. Choose **Download Jira Toolkit JSON**. In **Planner conversion**, select that JSON file. The converter also accepts earlier **Download JSON** exports with fewer source fields. Review the card and subtask counts before downloading the Jira CSV. Optionally select a template card to supply missing checklist steps to cards labeled Implementation. The template itself is excluded when selected.
+
+For an import from Chrome, select **Open Planner importer** in the extension popup and connect the signed-in Jira tab. The local assistant bridge is optional. Alternatively, connect the destination tab in **Jira**, open **Planner conversion**, load the export and enter the project key. Select a checklist template if needed and choose **Import directly into [project]**. Keep the workspace open during the transfer. The extension uses the connected tab’s Jira REST API. It creates parents before children, sets dates and workflow transitions, and adds web links for the source plan and attachment references. Project-specific start dates are discovered from the issue’s editable fields. Descriptions show notes, attachments, dependencies and goals when available. Planner source details (plan name, link, IDs and outline number), priority, progress and status, start and finish, Teams conversation references, change history and effort text each have a separate description opt-in. Start and due dates appear in the native Jira fields. The importer copies business labels and stores the source identifier in an issue property. Direct import offers a separate opt-in for Jira original and remaining estimates, rounded to whole minutes from Planner browser effort. Existing Jira estimates and worklogs are preserved. The Cloud importer uses Jira rich-text headings and link marks. It retains UTC timestamps and expresses Planner browser effort in hours. **Match existing Jira work items only** limits the run to existing source identities. An exact, previously generated description can be upgraded to the new layout. Edited descriptions are preserved.
+
+In a Jira Cloud business space, **Create and match Planner buckets as Jira categories** creates missing Category options, including empty buckets listed in the browser export. It assigns each card and its subtasks the source bucket. Select **Group → Category** on the Jira board to see the bucket groups alongside workflow statuses. The importer preserves existing category names and reports any conflicting assignments. Jira controls option colors.
+
+The importer matches source IDs from CSV imports that include Planner source details and marks each issue for future runs. Its local checkpoint lets the same Chrome profile resume an interrupted import. If a create response is lost, it stops until Jira can confirm the matching issue. Completed items retain subsequent Jira edits. Finish any pending CSV import before running the direct importer on the same cards.
+
+Use Jira’s **Spaces → Create space → Import data → CSV** workflow and select the destination. Map the work item ID and parent columns to preserve checklist relationships. Verify Task and Sub-task against the space’s work types, map the statuses and use the date format `yyyy-MM-dd`. The space needs an in-progress workflow status to represent partial completion. Import once into each destination. A second import creates additional issues.
+
+Each Planner card becomes a Jira task. Checklist entries become subtasks. Readiness Assessment, Complexity Score and Ticket # map to editable Jira short-text fields on Tasks. Direct import matches each field by name and type and fills empty values. In the CSV wizard, map the corresponding columns when present. Labels come from the Planner card. The optional Jira Category mapping carries the bucket. A missing checklist state gets the label `planner-status-review` and uses the destination’s default status until reviewed.
+
+For a manual return, connect a signed-in tab under **Jira**. In **Planner conversion**, enter the destination project key and select **Download Planner CSV**. This retrieves the current headings of imported Planner cards, their Jira URLs and statuses. Use the CSV to reconcile existing cards or use Planner’s import screen to create headings in another plan.
+
+Add a multiple-user People field named **Planner owners** to the destination Task layout. Direct import fills it with matched Planner owners and reports unresolved identities. A single source owner also fills an empty Assignee. Shared cards start unassigned, and repeat imports preserve a primary chosen in Jira. To send a specific owner last on shared cards, put their Planner display name on one line in `planner-owner-last.local.txt` at the repository root and rebuild. The preference applies to both the local extension bundle and the CLI. A fresh clone uses Planner order. Jira may sort the native People field after saving.
+
+To apply only the owner rules to previously imported Jira Cloud cards, start the toolkit bridge in Create and edit mode and run the command below from the toolkit repository after building. It matches the hidden Planner source ID, verifies saved memberships, and prints a JSON report with source owners in import order and Jira owners in the returned field order.
+
+```sh
+npm run --silent planner:owners -- --project TEST --file /path/to/planner-export.json
+```
 
 ## Search & Audit
 

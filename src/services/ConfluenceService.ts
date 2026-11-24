@@ -256,6 +256,8 @@ export async function runConfluenceTool(site: Site, call: ToolCall): Promise<unk
     };
     throw new ConfluenceError(messages[response.status] ?? `Confluence returned HTTP ${response.status}.`, response.status);
   }
+  // Jira confirms a created issue link with HTTP 201 and an empty body.
+  if (call.name === 'jira_link_issues' && response.status === 201) return {};
   if (response.status === 204) return { pageId: 'pageId' in call.input ? call.input.pageId : undefined };
   if (!/\bapplication\/(?:[\w.+-]+\+)?json\b/i.test(response.headers.get('content-type') ?? '')) {
     throw new ConfluenceError('Confluence returned a non-JSON page. Check sign-in and the context path.');

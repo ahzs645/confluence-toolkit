@@ -10,6 +10,9 @@ export function isJiraCall(call: ToolCall): call is JiraCall {
 export function buildJiraRequest(call: JiraCall, cloud: boolean): Request {
   const api = cloud ? '/rest/api/3' : '/rest/api/2';
   const input = call.input;
+  const properties = 'plannerProperties' in input && input.plannerProperties ? {properties:'plannerSource'} : {};
+  const sourceProperty = 'plannerSource' in input && input.plannerSource
+    ? {properties:[{key:'plannerSource',value:input.plannerSource}]} : {};
   const issue = api + '/issue/' + ('issue' in input ? input.issue : '');
   const project = api + '/project/' + ('projectKey' in input ? input.projectKey : '');
   const board = '/rest/agile/1.0/board/' + ('boardId' in input ? input.boardId : '');
@@ -31,21 +34,21 @@ export function buildJiraRequest(call: JiraCall, cloud: boolean): Request {
     case 'jira_search':
       return cloud
         ? { path: api + '/search/jql', query: { maxResults: call.input.limit, nextPageToken: call.input.nextPageToken,
-            jql: call.input.jql, fields: 'summary,status,assignee,issuetype,project' } }
-        : { path: api + '/search', query: { ...paging, jql: call.input.jql, fields: 'summary,status,assignee,issuetype,project' } };
-    case 'jira_get_issue': return { path: issue };
+            ...properties, jql: call.input.jql, fields: call.input.fields?.join(',') ?? 'summary,status,assignee,issuetype,project' } }
+        : { path: api + '/search', query: { ...paging, ...properties, jql: call.input.jql, fields: call.input.fields?.join(',') ?? 'summary,status,assignee,issuetype,project' } };
+    case 'jira_get_issue': return { path: issue, query:{...properties,...(call.input.identityOnly ? {fields:'key'} : {})} };
     case 'jira_get_issue_fields': return { path: issue + '/editmeta' };
     case 'jira_list_fields': return { path: api + '/field' };
     case 'jira_issue_history':
       return cloud ? { path: issue + '/changelog', query: paging } : { path: issue, query: { expand: 'changelog', fields: 'summary' } };
     case 'jira_create_issue': {
       const { fields, projectKey, issueTypeId, summary, description } = call.input;
-      return { path: api + '/issue', method: 'POST', body: { fields: {
+      return { path: api + '/issue', method: 'POST', body: { ...sourceProperty, fields: {
         ...fields, project: { key: projectKey }, issuetype: { id: issueTypeId }, summary,
         ...(description === undefined ? {} : { description: textBody(description) }),
       } } };
     }
-    case 'jira_update_issue': return { path: issue, method: 'PUT', body: { fields: call.input.fields } };
+    case 'jira_update_issue': return { path: issue, method: 'PUT', body: { ...sourceProperty, fields: call.input.fields } };
     case 'jira_delete_issue': return { path: issue, method: 'DELETE' };
     case 'jira_list_comments': return { path: issue + '/comment', query: paging };
     case 'jira_add_comment':
@@ -73,6 +76,23 @@ export function buildJiraRequest(call: JiraCall, cloud: boolean): Request {
       return { path: issue + '/worklog', method: 'POST', body: {
         timeSpentSeconds: call.input.seconds, started: call.input.started, comment: call.input.text && textBody(call.input.text),
       } };
+    case 'jira_get_create_fields':
+      if (!cloud) throw new Error('Category import requires a Jira Cloud business space.');
+      return {path: api + '/issue/createmeta/' + call.input.projectKey + '/issuetypes/' + call.input.issueTypeId, query: paging};
+    case 'jira_create_category':
+      if (!cloud) throw new Error('Category creation requires a Jira Cloud business space.');
+      return {path: '/rest/gira/1/', query: {operation:'JwmCreateCategory'}, method:'POST', body:{
+        operationName:'JwmCreateCategory', variables:{input:{...call.input,color:'TEAL'}},
+        query:`mutation JwmCreateCategory($input: JWMCreateCategoryInput!) {
+          createJwmCategory(input: $input) {
+            success errors { message } category { option { optionId value isDisabled } }
+          }
+        }`,
+      }};
+    case 'jira_list_web_links': return { path: issue + '/remotelink' };
+    case 'jira_put_web_link': return { path: issue + '/remotelink', method: 'POST', body: {
+      globalId: call.input.globalId, object: { title: call.input.title, url: call.input.url },
+    } };
     case 'jira_get_attachment': return { path: api + '/attachment/' + call.input.attachmentId };
     case 'jira_list_link_types': return { path: api + '/issueLinkType' };
     case 'jira_link_issues':
@@ -81,7 +101,7 @@ export function buildJiraRequest(call: JiraCall, cloud: boolean): Request {
       } };
     case 'jira_unlink_issues': return { path: api + '/issueLink/' + call.input.linkId, method: 'DELETE' };
     case 'jira_search_users':
-      return { path: api + '/user/search', query: { ...paging, [cloud ? 'query' : 'username']: call.input.query } };
+      return { path: api + (call.input.projectKey ? '/user/assignable/search' : '/user/search'), query: { ...paging, project:call.input.projectKey, [cloud ? 'query' : 'username']: call.input.query } };
     case 'jira_list_watchers': return { path: issue + '/watchers' };
     case 'jira_add_watcher': return { path: issue + '/watchers', method: 'POST', body: call.input.user };
     case 'jira_remove_watcher':

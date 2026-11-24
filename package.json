@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && playwright test",
     "test:e2e": "playwright test",
+    "planner:owners": "node scripts/planner-owners.mjs",
     "install:host": "node scripts/install-host.mjs",
     "mcp": "node bridge/server.mjs",
     "package": "npm run build && node scripts/package.mjs",

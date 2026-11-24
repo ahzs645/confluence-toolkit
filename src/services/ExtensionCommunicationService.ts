@@ -3,7 +3,7 @@ import type { ToolArgs, ToolName } from '../models/tools';
 
 export async function request<T>(message: Record<string, unknown>): Promise<T> {
   const reply: Reply<T> = await chrome.runtime.sendMessage(message);
-  if (!reply?.ok) throw new Error(reply?.error ?? 'Confluence Toolkit did not respond.');
+  if (!reply?.ok) throw Object.assign(new Error(reply?.error ?? 'Confluence Toolkit did not respond.'), {status: reply?.status});
   return reply.data;
 }
 
